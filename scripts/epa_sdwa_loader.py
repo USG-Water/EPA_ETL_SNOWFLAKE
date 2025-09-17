@@ -544,9 +544,9 @@ def main():
                     load_id=load_id
                 )
                 
-                # Deduplicate if needed
-                if rows_loaded > 0:
-                    sf_loader.deduplicate_table(table_name)
+                # Skip deduplication for now - can be run separately if needed
+                # if rows_loaded > 0:
+                #     sf_loader.deduplicate_table(table_name)
                 
                 total_tables_processed += 1
                 total_rows_loaded += rows_loaded
