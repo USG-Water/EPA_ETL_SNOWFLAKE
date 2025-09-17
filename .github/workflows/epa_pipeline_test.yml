@@ -75,6 +75,8 @@ jobs:
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
           TEST_MODE: "true"
           MAX_ROWS_PER_TABLE: ${{ env.TEST_ROW_LIMIT }}
+          TEST_SDWA: "true"
+          TEST_FRS: "true"
         run: |
           echo "=== EPA Pipeline Test Run ==="
           echo "Timestamp: $(date)"
@@ -82,176 +84,90 @@ jobs:
           echo "Branch: ${{ github.ref }}"
           echo "Test row limit: ${MAX_ROWS_PER_TABLE}"
           
-          # Create the test runner script
-          cat > test_pipeline.py << 'EOF'
-          import os
-          import sys
-          import logging
-          from datetime import datetime
-          
-          # Set up logging
-          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-          logger = logging.getLogger(__name__)
-          
-          # Set test mode environment variables
-          os.environ['TEST_MODE'] = 'true'
-          max_rows = os.environ.get('MAX_ROWS_PER_TABLE', '1000')
-          
-          logger.info(f"Starting pipeline test with {max_rows} rows per table")
-          
-          # Track results
-          results = {
-              'sdwa': {'status': 'pending', 'tables': 0, 'rows': 0, 'errors': []},
-              'frs': {'status': 'pending', 'tables': 0, 'rows': 0, 'errors': []}
-          }
-          
-          # Test SDWA loader
-          try:
-              logger.info("\n=== Testing SDWA Loader ===")
+          # Run the dedicated test script
+          if [ -f "test_epa_loader.py" ]; then
+              python test_epa_loader.py
+          elif [ -f "scripts/test_epa_loader.py" ]; then
+              python scripts/test_epa_loader.py
+          else
+              echo "Test script not found, creating inline..."
               
-              # Check if file exists
-              if os.path.exists('epa_sdwa_loader.py'):
-                  script_path = 'epa_sdwa_loader.py'
-              elif os.path.exists('scripts/epa_sdwa_loader.py'):
-                  script_path = 'scripts/epa_sdwa_loader.py'
-              else:
-                  raise FileNotFoundError("Cannot find epa_sdwa_loader.py")
+              # Download the test script content
+              cat > test_epa_loader.py << 'TESTSCRIPT'
+#!/usr/bin/env python3
+import os
+import sys
+import logging
+import tempfile
+from datetime import datetime
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+logging.getLogger('snowflake.connector').setLevel(logging.WARNING)
+logging.getLogger('snowflake.connector.ocsp_snowflake').setLevel(logging.ERROR)
+
+def test_loader_with_limit(loader_type='sdwa'):
+    """Test EPA loader with row limits."""
+    max_rows = int(os.environ.get('MAX_ROWS_PER_TABLE', '1000'))
+    logger.info(f"Testing {loader_type.upper()} with max {max_rows} rows per table")
+    
+    # Import the loader
+    if loader_type == 'sdwa':
+        if os.path.exists('epa_sdwa_loader.py'):
+            import epa_sdwa_loader as loader
+        else:
+            logger.error("SDWA loader not found")
+            return 1
+    else:
+        if os.path.exists('epa_frs_loader.py'):
+            import epa_frs_loader as loader
+        else:
+            logger.warning("FRS loader not found, skipping")
+            return 0
+    
+    # Monkey patch the CSV reading to limit rows
+    import pandas as pd
+    original_read_csv = pd.read_csv
+    
+    def limited_read_csv(*args, **kwargs):
+        # Force nrows limit
+        if 'nrows' not in kwargs or kwargs['nrows'] > max_rows:
+            kwargs['nrows'] = max_rows
+        logger.info(f"Reading CSV with limit: {kwargs.get('nrows')} rows")
+        return original_read_csv(*args, **kwargs)
+    
+    pd.read_csv = limited_read_csv
+    
+    # Override table names to add TEST_ prefix
+    if hasattr(loader, 'get_table_name_from_filename'):
+        original_get_name = loader.get_table_name_from_filename
+        loader.get_table_name_from_filename = lambda f: "TEST_" + original_get_name(f)
+    
+    # Force test schema
+    os.environ['SNOWFLAKE_SCHEMA'] = 'EPA_TEST_RESULTS'
+    
+    try:
+        exit_code = loader.main()
+        logger.info(f"{loader_type.upper()} test completed with code {exit_code}")
+        return exit_code
+    except Exception as e:
+        logger.error(f"{loader_type.upper()} test failed: {e}")
+        return 1
+
+# Run tests
+sdwa_result = test_loader_with_limit('sdwa')
+frs_result = test_loader_with_limit('frs')
+
+logger.info("="*60)
+logger.info(f"SDWA Test: {'PASSED' if sdwa_result == 0 else 'FAILED'}")
+logger.info(f"FRS Test: {'PASSED' if frs_result == 0 else 'FAILED'}")
+logger.info("="*60)
+
+sys.exit(0 if (sdwa_result == 0 and frs_result == 0) else 1)
+TESTSCRIPT
               
-              # Import and modify for testing
-              import importlib.util
-              spec = importlib.util.spec_from_file_location("epa_sdwa_loader", script_path)
-              sdwa_module = importlib.util.module_from_spec(spec)
-              
-              # Monkey-patch for testing
-              original_load = sdwa_module.SnowflakeKeyPairLoader.load_csv_to_table if hasattr(sdwa_module, 'SnowflakeKeyPairLoader') else None
-              
-              def test_load_csv_to_table(self, csv_path, table_name, chunk_size=1000, load_id=None):
-                  """Modified load function that only loads first N rows for testing"""
-                  import pandas as pd
-                  
-                  # Only load first N rows for testing
-                  max_rows = int(os.environ.get('MAX_ROWS_PER_TABLE', '1000'))
-                  logger.info(f"TEST MODE: Loading max {max_rows} rows for {table_name}")
-                  
-                  # Read limited rows
-                  df = pd.read_csv(csv_path, nrows=max_rows, dtype=str, na_filter=False)
-                  
-                  # Add TEST_ prefix to table name
-                  table_name = f"TEST_{table_name}"
-                  
-                  # Call original method with limited data
-                  temp_csv = f"/tmp/test_{table_name}.csv"
-                  df.to_csv(temp_csv, index=False)
-                  
-                  # Use smaller chunk size for test
-                  result = original_load(self, temp_csv, table_name, chunk_size=500, load_id=load_id)
-                  
-                  # Clean up temp file
-                  if os.path.exists(temp_csv):
-                      os.remove(temp_csv)
-                  
-                  return min(result, max_rows) if result else 0
-              
-              if original_load:
-                  sdwa_module.SnowflakeKeyPairLoader.load_csv_to_table = test_load_csv_to_table
-              
-              # Run the SDWA loader
-              spec.loader.exec_module(sdwa_module)
-              
-              # Call main function
-              exit_code = sdwa_module.main()
-              
-              if exit_code == 0:
-                  results['sdwa']['status'] = 'success'
-                  logger.info("✅ SDWA loader test passed")
-              else:
-                  results['sdwa']['status'] = 'failed'
-                  results['sdwa']['errors'].append(f"Exit code: {exit_code}")
-                  logger.error(f"❌ SDWA loader test failed with exit code {exit_code}")
-                  
-          except Exception as e:
-              results['sdwa']['status'] = 'error'
-              results['sdwa']['errors'].append(str(e))
-              logger.error(f"❌ SDWA loader test error: {e}")
-          
-          # Test FRS loader (if it exists)
-          try:
-              logger.info("\n=== Testing FRS Loader ===")
-              
-              # Check if file exists
-              if os.path.exists('epa_frs_loader.py'):
-                  script_path = 'epa_frs_loader.py'
-              elif os.path.exists('scripts/epa_frs_loader.py'):
-                  script_path = 'scripts/epa_frs_loader.py'
-              else:
-                  logger.warning("FRS loader not found, skipping")
-                  results['frs']['status'] = 'skipped'
-              
-              if results['frs']['status'] != 'skipped':
-                  spec = importlib.util.spec_from_file_location("epa_frs_loader", script_path)
-                  frs_module = importlib.util.module_from_spec(spec)
-                  
-                  # Apply same monkey-patch for FRS
-                  if hasattr(frs_module, 'SnowflakeFRSLoader'):
-                      original_frs_load = frs_module.SnowflakeFRSLoader.load_csv_to_table
-                      
-                      def test_frs_load_csv_to_table(self, csv_path, table_name, chunk_size=1000, load_id=None):
-                          import pandas as pd
-                          max_rows = int(os.environ.get('MAX_ROWS_PER_TABLE', '1000'))
-                          logger.info(f"TEST MODE: Loading max {max_rows} rows for {table_name}")
-                          
-                          df = pd.read_csv(csv_path, nrows=max_rows, dtype=str, na_filter=False)
-                          table_name = f"TEST_{table_name}"
-                          
-                          temp_csv = f"/tmp/test_{table_name}.csv"
-                          df.to_csv(temp_csv, index=False)
-                          
-                          result = original_frs_load(self, temp_csv, table_name, chunk_size=500, load_id=load_id)
-                          
-                          if os.path.exists(temp_csv):
-                              os.remove(temp_csv)
-                          
-                          return min(result, max_rows) if result else 0
-                      
-                      frs_module.SnowflakeFRSLoader.load_csv_to_table = test_frs_load_csv_to_table
-                  
-                  spec.loader.exec_module(frs_module)
-                  exit_code = frs_module.main()
-                  
-                  if exit_code == 0:
-                      results['frs']['status'] = 'success'
-                      logger.info("✅ FRS loader test passed")
-                  else:
-                      results['frs']['status'] = 'failed'
-                      results['frs']['errors'].append(f"Exit code: {exit_code}")
-                      logger.error(f"❌ FRS loader test failed with exit code {exit_code}")
-                      
-          except Exception as e:
-              results['frs']['status'] = 'error'
-              results['frs']['errors'].append(str(e))
-              logger.error(f"❌ FRS loader test error: {e}")
-          
-          # Print summary
-          logger.info("\n" + "="*50)
-          logger.info("TEST SUMMARY")
-          logger.info("="*50)
-          
-          overall_success = True
-          for loader, result in results.items():
-              status_icon = "✅" if result['status'] == 'success' else "⚠️" if result['status'] == 'skipped' else "❌"
-              logger.info(f"{status_icon} {loader.upper()}: {result['status']}")
-              if result['errors']:
-                  for error in result['errors']:
-                      logger.info(f"    Error: {error}")
-              if result['status'] not in ['success', 'skipped']:
-                  overall_success = False
-          
-          # Exit with appropriate code
-          sys.exit(0 if overall_success else 1)
-          EOF
-          
-          # Run the test script
-          python test_pipeline.py
+              python test_epa_loader.py
+          fi
           
           EXIT_CODE=$?
           
