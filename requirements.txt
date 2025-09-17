@@ -1,0 +1,32 @@
+# Core dependencies for EPA data pipeline
+# These are shared across all ETL scripts in the repository
+
+# Snowflake connector with secure storage support
+snowflake-connector-python[secure-local-storage]==3.5.0
+
+# Data processing
+pandas==2.1.4
+numpy==1.24.3
+
+# HTTP requests for downloading data
+requests==2.31.0
+
+# Cryptography for RSA key handling
+cryptography==41.0.7
+
+# Optional: For enhanced logging and monitoring
+python-dotenv==1.0.0  # For local development with .env files
+
+# Optional: Data quality and validation
+great-expectations==0.18.8  # For data validation rules
+pydantic==2.5.3  # For config validation
+
+# Optional: Performance improvements
+pyarrow==14.0.2  # For faster parquet operations if needed
+
+# Development dependencies (install with pip install -r requirements-dev.txt)
+# pytest==7.4.3
+# pytest-cov==4.1.0
+# black==23.12.1
+# flake8==6.1.0
+# mypy==1.8.0
