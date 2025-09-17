@@ -267,7 +267,29 @@ class SnowflakeKeyPairLoader:
         
         # Check if table exists
         if self.table_exists(table_name):
-            logger.info(f"Table {table_name} already exists - will append data")
+            logger.info(f"Table {table_name} already exists - checking for missing columns")
+            
+            # Check if required metadata columns exist and add them if missing
+            cursor = self.conn.cursor()
+            
+            # Get existing columns
+            cursor.execute(f"DESCRIBE TABLE \"{table_name}\"")
+            existing_columns = [row[0].upper() for row in cursor.fetchall()]
+            
+            # Add missing metadata columns
+            if 'LOAD_ID' not in existing_columns:
+                logger.info(f"Adding LOAD_ID column to {table_name}")
+                cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_ID" STRING')
+            
+            if 'LOAD_TIMESTAMP' not in existing_columns:
+                logger.info(f"Adding LOAD_TIMESTAMP column to {table_name}")
+                cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_TIMESTAMP" TIMESTAMP DEFAULT CURRENT_TIMESTAMP()')
+            
+            if 'LOAD_DATE' not in existing_columns:
+                logger.info(f"Adding LOAD_DATE column to {table_name}")
+                cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_DATE" DATE DEFAULT CURRENT_DATE()')
+            
+            cursor.close()
             return "EXISTS"
         
         # Create new table with all columns as STRING for flexibility
@@ -416,20 +438,39 @@ class SnowflakeKeyPairLoader:
             
             summary = {}
             for (table_name,) in tables:
-                cursor.execute(f"""
-                    SELECT 
-                        COUNT(*) as total_rows,
-                        MAX(LOAD_TIMESTAMP) as last_load,
-                        COUNT(DISTINCT LOAD_ID) as load_count
-                    FROM "{table_name}"
-                """)
-                result = cursor.fetchone()
-                if result:
-                    summary[table_name] = {
-                        'total_rows': result[0],
-                        'last_load': result[1],
-                        'load_count': result[2]
-                    }
+                try:
+                    # First check if LOAD_ID column exists
+                    cursor.execute(f"DESCRIBE TABLE \"{table_name}\"")
+                    columns = [row[0].upper() for row in cursor.fetchall()]
+                    
+                    if 'LOAD_ID' in columns:
+                        cursor.execute(f"""
+                            SELECT 
+                                COUNT(*) as total_rows,
+                                MAX(LOAD_TIMESTAMP) as last_load,
+                                COUNT(DISTINCT LOAD_ID) as load_count
+                            FROM "{table_name}"
+                        """)
+                    else:
+                        # If no LOAD_ID column, just get row count
+                        cursor.execute(f"""
+                            SELECT 
+                                COUNT(*) as total_rows,
+                                NULL as last_load,
+                                0 as load_count
+                            FROM "{table_name}"
+                        """)
+                    
+                    result = cursor.fetchone()
+                    if result:
+                        summary[table_name] = {
+                            'total_rows': result[0],
+                            'last_load': result[1],
+                            'load_count': result[2]
+                        }
+                except Exception as e:
+                    logger.warning(f"Could not get summary for {table_name}: {e}")
+                    summary[table_name] = {'error': str(e)}
             
             cursor.close()
             return summary
@@ -440,10 +481,14 @@ class SnowflakeKeyPairLoader:
 
 def get_table_name_from_filename(filename: str) -> str:
     """Generate a clean table name from CSV filename."""
+    # Remove .csv extension and clean name
     table_name = filename.replace('.csv', '').replace('.CSV', '')
     table_name = table_name.replace('-', '_').replace(' ', '_').upper()
     
-    if not table_name.startswith('EPA_SDWA_'):
+    # For SDWA files, keep the EPA_SDWA prefix but avoid duplication
+    if table_name.startswith('SDWA_'):
+        table_name = f"EPA_{table_name}"
+    elif not table_name.startswith('EPA_'):
         table_name = f"EPA_SDWA_{table_name}"
     
     return table_name
