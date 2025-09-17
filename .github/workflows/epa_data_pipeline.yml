@@ -16,6 +16,14 @@ on:
         options:
         - 'true'
         - 'false'
+      run_deduplication:
+        description: 'Run deduplication after load'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+        - 'true'
+        - 'false'
 
 env:
   PYTHON_VERSION: '3.9'
@@ -25,8 +33,6 @@ jobs:
     name: EPA SDWA Data ETL
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    
-    # Environment protection rules can be set up in GitHub settings
     environment: production
     
     steps:
@@ -39,13 +45,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
       
       - name: Cache Python Dependencies
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          path: |
+            ~/.cache/pip
+            ~/.local
+            /opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
       
@@ -53,14 +61,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          
+          # Reduce Snowflake connector verbosity
+          export SNOWFLAKE_CONNECTOR_LOG_LEVEL=WARNING
       
       - name: Set Debug Mode
         if: github.event.inputs.debug_enabled == 'true'
         run: echo "DEBUG_MODE=true" >> $GITHUB_ENV
       
+      - name: Set Deduplication Flag
+        run: |
+          if [ "${{ github.event.inputs.run_deduplication }}" == "true" ]; then
+            echo "RUN_DEDUPLICATION=true" >> $GITHUB_ENV
+          else
+            echo "RUN_DEDUPLICATION=false" >> $GITHUB_ENV
+          fi
+      
       - name: Run EPA SDWA ETL
         env:
-          # Snowflake connection parameters from repository secrets
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
@@ -71,65 +89,195 @@ jobs:
         run: |
           echo "Starting EPA SDWA ETL process..."
           echo "Timestamp: $(date)"
-          echo "Current directory: $(pwd)"
-          echo "Repository structure:"
-          ls -la
+          echo "Deduplication: ${RUN_DEDUPLICATION}"
           
-          # Run the ETL script (check if it's in root or scripts folder)
+          # Reduce logging verbosity
+          export PYTHONWARNINGS="ignore"
+          
+          # Run the SDWA ETL script
           if [ -f "epa_sdwa_loader.py" ]; then
               python epa_sdwa_loader.py
           elif [ -f "scripts/epa_sdwa_loader.py" ]; then
               python scripts/epa_sdwa_loader.py
           else
               echo "Error: Cannot find epa_sdwa_loader.py"
-              echo "Directory contents:"
-              find . -name "*.py" -type f
               exit 1
           fi
           
-          # Capture exit code
           EXIT_CODE=$?
-          
-          echo "ETL process completed with exit code: $EXIT_CODE"
+          echo "SDWA ETL process completed with exit code: $EXIT_CODE"
           exit $EXIT_CODE
       
-      - name: Upload Logs on Failure
+      - name: Upload SDWA Logs on Failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: etl-failure-logs
+          name: sdwa-etl-failure-logs-${{ github.run_number }}
           path: |
             *.log
             /tmp/epa_data_*
           retention-days: 7
+  
+  epa-frs-etl:
+    name: EPA FRS Data ETL
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: production
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
-      - name: Send Success Notification
-        if: success()
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Cache Python Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local
+            /opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install Dependencies
         run: |
-          echo "✅ EPA SDWA ETL completed successfully"
-          echo "Run ID: ${{ github.run_id }}"
-          echo "Run Number: ${{ github.run_number }}"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+          # Reduce Snowflake connector verbosity
+          export SNOWFLAKE_CONNECTOR_LOG_LEVEL=WARNING
       
-      - name: Send Failure Notification
+      - name: Set Debug Mode
+        if: github.event.inputs.debug_enabled == 'true'
+        run: echo "DEBUG_MODE=true" >> $GITHUB_ENV
+      
+      - name: Set Deduplication Flag
+        run: |
+          if [ "${{ github.event.inputs.run_deduplication }}" == "true" ]; then
+            echo "RUN_DEDUPLICATION=true" >> $GITHUB_ENV
+          else
+            echo "RUN_DEDUPLICATION=false" >> $GITHUB_ENV
+          fi
+      
+      - name: Run EPA FRS ETL
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          echo "Starting EPA FRS ETL process..."
+          echo "Timestamp: $(date)"
+          echo "Deduplication: ${RUN_DEDUPLICATION}"
+          
+          # Reduce logging verbosity
+          export PYTHONWARNINGS="ignore"
+          
+          # Run the FRS ETL script
+          if [ -f "epa_frs_loader.py" ]; then
+              python epa_frs_loader.py
+          elif [ -f "scripts/epa_frs_loader.py" ]; then
+              python scripts/epa_frs_loader.py
+          else
+              echo "Warning: Cannot find epa_frs_loader.py - skipping FRS load"
+              exit 0
+          fi
+          
+          EXIT_CODE=$?
+          echo "FRS ETL process completed with exit code: $EXIT_CODE"
+          exit $EXIT_CODE
+      
+      - name: Upload FRS Logs on Failure
         if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frs-etl-failure-logs-${{ github.run_number }}
+          path: |
+            *.log
+            /tmp/epa_frs_data_*
+          retention-days: 7
+  
+  summary:
+    name: ETL Summary
+    runs-on: ubuntu-latest
+    needs: [epa-sdwa-etl, epa-frs-etl]
+    if: always()
+    
+    steps:
+      - name: Check Results
         run: |
-          echo "❌ EPA SDWA ETL failed"
-          echo "Run ID: ${{ github.run_id }}"
+          echo "=== EPA ETL Pipeline Summary ==="
           echo "Run Number: ${{ github.run_number }}"
-          echo "Please check the logs for details"
+          echo "Triggered by: ${{ github.event_name }}"
+          echo ""
+          echo "SDWA ETL Status: ${{ needs.epa-sdwa-etl.result }}"
+          echo "FRS ETL Status: ${{ needs.epa-frs-etl.result }}"
+          echo ""
+          
+          if [ "${{ needs.epa-sdwa-etl.result }}" == "success" ] && [ "${{ needs.epa-frs-etl.result }}" == "success" ]; then
+            echo "✅ All EPA data loads completed successfully"
+            echo ""
+            echo "Next scheduled run: 6 weeks from now"
+          elif [ "${{ needs.epa-sdwa-etl.result }}" == "failure" ] || [ "${{ needs.epa-frs-etl.result }}" == "failure" ]; then
+            echo "❌ One or more EPA data loads failed"
+            echo "Please check the logs for details"
+            exit 1
+          else
+            echo "⚠️ Pipeline completed with warnings"
+          fi
+      
+      - name: Create Summary Report
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # EPA Data Pipeline Results
+          
+          ## Run Information
+          - **Run Number:** ${{ github.run_number }}
+          - **Triggered By:** ${{ github.event_name }}
+          - **Actor:** ${{ github.actor }}
+          - **Time:** $(date)
+          
+          ## Job Results
+          | Dataset | Status | Result |
+          |---------|--------|--------|
+          | SDWA | ${{ needs.epa-sdwa-etl.result }} | $([ "${{ needs.epa-sdwa-etl.result }}" == "success" ] && echo "✅" || echo "❌") |
+          | FRS | ${{ needs.epa-frs-etl.result }} | $([ "${{ needs.epa-frs-etl.result }}" == "success" ] && echo "✅" || echo "❌") |
+          
+          ## Next Steps
+          $(if [ "${{ needs.epa-sdwa-etl.result }}" != "success" ] || [ "${{ needs.epa-frs-etl.result }}" != "success" ]; then
+            echo "- Review failure logs in the artifacts"
+            echo "- Check Snowflake warehouse for any partial loads"
+            echo "- Re-run failed jobs manually if needed"
+          else
+            echo "- Data successfully loaded to Snowflake"
+            echo "- Tables available in USG_RAW.EPA_DATA_RAW schema"
+            echo "- Next automatic run scheduled in 6 weeks"
+          fi)
+          EOF
 
-  # Optional: Add other EPA data sources as separate jobs
-  # epa-other-etl:
-  #   name: EPA Other Data ETL
-  #   runs-on: ubuntu-latest
-  #   needs: epa-sdwa-etl  # Run after SDWA completes
-  #   steps:
-  #     - name: Checkout Repository
-  #       uses: actions/checkout@v3
-  #     # Add steps for other EPA data sources
-
-# Workflow notifications can be enhanced with:
-# - Slack notifications using slack-github-action
-# - Email notifications using custom actions
-# - Teams notifications
-# - PagerDuty alerts for failures
+# Optional: Add notifications
+# You can add Slack, email, or Teams notifications here
+# Example:
+# notify-slack:
+#   needs: summary
+#   if: failure()
+#   runs-on: ubuntu-latest
+#   steps:
+#     - name: Send Slack notification
+#       uses: 8398a7/action-slack@v3
+#       with:
+#         status: failure
+#         text: 'EPA Data Pipeline failed!'
+#       env:
+#         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
