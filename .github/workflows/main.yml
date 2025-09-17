@@ -68,13 +68,24 @@ jobs:
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
-          SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
         run: |
           echo "Starting EPA SDWA ETL process..."
           echo "Timestamp: $(date)"
+          echo "Current directory: $(pwd)"
+          echo "Repository structure:"
+          ls -la
           
-          # Run the ETL script
-          python scripts/epa_sdwa_loader.py
+          # Run the ETL script (check if it's in root or scripts folder)
+          if [ -f "epa_sdwa_loader.py" ]; then
+              python epa_sdwa_loader.py
+          elif [ -f "scripts/epa_sdwa_loader.py" ]; then
+              python scripts/epa_sdwa_loader.py
+          else
+              echo "Error: Cannot find epa_sdwa_loader.py"
+              echo "Directory contents:"
+              find . -name "*.py" -type f
+              exit 1
+          fi
           
           # Capture exit code
           EXIT_CODE=$?
