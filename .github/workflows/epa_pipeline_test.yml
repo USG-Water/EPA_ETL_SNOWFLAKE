@@ -49,16 +49,18 @@ jobs:
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
           MAX_ROWS_PER_TABLE: ${{ github.event.inputs.row_limit || '1000' }}
+          MAX_FILES_TO_PROCESS: '3'
         run: |
           echo "Running EPA test pipeline"
           echo "Row limit: ${MAX_ROWS_PER_TABLE}"
+          echo "Files to process: ${MAX_FILES_TO_PROCESS}"
+          echo "Target schema: EPA_TEST_RESULTS"
           
-          if [ -f "test_epa_pipeline.py" ]; then
-              python test_epa_pipeline.py
-          else
-              echo "Creating simple test..."
-              python -c "print('Test pipeline - would load ${MAX_ROWS_PER_TABLE} rows to EPA_TEST_RESULTS')"
-          fi
+          # Force test schema
+          export SNOWFLAKE_SCHEMA=EPA_TEST_RESULTS
+          
+          # Run the test script from scripts directory
+          python scripts/test_epa_pipeline.py
       
       - name: Summary
         if: always()
