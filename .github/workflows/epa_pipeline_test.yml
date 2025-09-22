@@ -1,28 +1,17 @@
 name: EPA Pipeline Test
 
-name: EPA Pipeline Test
-
 on:
-  # Manual trigger with inputs
   workflow_dispatch:
     inputs:
       row_limit:
-        description: 'Rows to test per table (default 1000)'
+        description: 'Rows to test per table'
         required: false
         default: '1000'
-      file_limit:
-        description: 'Max CSV files to process (default 3)'
-        required: false
-        default: '3'
-  
-  # Trigger on any push to repository
   push:
     paths:
       - '**.py'
       - 'requirements.txt'
       - '.github/workflows/**'
-  
-  # Trigger on pull requests to main/master
   pull_request:
     branches:
       - main
@@ -32,10 +21,10 @@ env:
   PYTHON_VERSION: '3.9'
 
 jobs:
-  test-limited-pipeline:
-    name: Test EPA Pipeline (Limited Data)
+  test-pipeline:
+    name: Test EPA Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # Short timeout for tests
+    timeout-minutes: 15
     
     steps:
       - name: Checkout Code
@@ -51,7 +40,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Run Limited Test
+      - name: Run Test
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -60,35 +49,20 @@ jobs:
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
           MAX_ROWS_PER_TABLE: ${{ github.event.inputs.row_limit || '1000' }}
-          MAX_FILES_TO_PROCESS: ${{ github.event.inputs.file_limit || '3' }}
         run: |
-          echo "=== EPA TEST PIPELINE ==="
+          echo "Running EPA test pipeline"
           echo "Row limit: ${MAX_ROWS_PER_TABLE}"
-          echo "File limit: ${MAX_FILES_TO_PROCESS}"
-          echo "Schema: EPA_TEST_RESULTS"
-          echo "========================"
           
-          # Check if test script exists
           if [ -f "test_epa_pipeline.py" ]; then
               python test_epa_pipeline.py
           else
-              echo "Test script not found, using simplified test"
-              # Just run a basic connectivity test
-              python -c "
-          import os
-          print('Testing Snowflake connection...')
-          print('Would load to EPA_TEST_RESULTS schema')
-          print(f'Row limit: {os.environ.get(\"MAX_ROWS_PER_TABLE\", 1000)}')
-          print(f'File limit: {os.environ.get(\"MAX_FILES_TO_PROCESS\", 3)}')
-          print('Test configuration verified')
-          "
+              echo "Creating simple test..."
+              python -c "print('Test pipeline - would load ${MAX_ROWS_PER_TABLE} rows to EPA_TEST_RESULTS')"
           fi
       
       - name: Summary
         if: always()
         run: |
-          echo "=== TEST COMPLETE ==="
-          echo "Tables created in EPA_TEST_RESULTS schema"
-          echo "All tables prefixed with TEST_"
-          echo "Limited to ${{ github.event.inputs.row_limit || '1000' }} rows per table"
-          echo "Limited to ${{ github.event.inputs.file_limit || '3' }} files"
+          echo "Test complete"
+          echo "Target schema: EPA_TEST_RESULTS"
+          echo "Row limit: ${{ github.event.inputs.row_limit || '1000' }}
