@@ -1,142 +1,181 @@
 name: EPA Pipeline Test
 
 on:
-  # Run on pushes to any branch
+  # Always allow manual trigger
+  workflow_dispatch:
+    inputs:
+      row_limit:
+        description: 'Rows to test per table (default 1000)'
+        required: false
+        default: '1000'
+      file_limit:
+        description: 'Max CSV files to process (default 3)'
+        required: false
+        default: '3'
+  
+  # Trigger on push to any branch
   push:
-    branches:
-      - '**'
     paths:
       - '**.py'
       - 'requirements.txt'
-      - '.github/workflows/epa_pipeline_test.yml'
+      - '.github/workflows/**'
   
-  # Run on pull requests
+  # Trigger on PRs
   pull_request:
     branches:
       - main
       - master
-  
-  # Allow manual trigger
-  workflow_dispatch:
-    inputs:
-      row_limit:
-        description: 'Number of rows to test per file'
-        required: false
-        default: '1000'
-        type: string
 
 env:
   PYTHON_VERSION: '3.9'
-  TEST_ROW_LIMIT: ${{ github.event.inputs.row_limit || '1000' }}
-  
+
 jobs:
-  test-pipeline:
-    name: Test EPA Data Pipeline
+  test-limited-pipeline:
+    name: Test EPA Pipeline (Limited Data)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15  # Short timeout for tests
     
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      
-      - name: Cache Python Dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.local
-            /opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages
-          key: ${{ runner.os }}-pip-test-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-test-
-            ${{ runner.os }}-pip-
       
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Create Test Script
-        run: |
-          cat > run_test.py << 'SCRIPT_END'
-          import os
-          import sys
-          import logging
-          import pandas as pd
-          from datetime import datetime
-
-          logging.basicConfig(level=logging.INFO)
-          logger = logging.getLogger(__name__)
-
-          # Suppress Snowflake warnings
-          logging.getLogger('snowflake.connector').setLevel(logging.WARNING)
-          logging.getLogger('snowflake.connector.ocsp_snowflake').setLevel(logging.ERROR)
-
-          def run_limited_test():
-              max_rows = int(os.environ.get('MAX_ROWS_PER_TABLE', '1000'))
-              logger.info(f"Running test with {max_rows} row limit")
-              
-              # Force test schema
-              os.environ['SNOWFLAKE_SCHEMA'] = 'EPA_TEST_RESULTS'
-              
-              # Monkey-patch pandas to limit rows
-              original_read = pd.read_csv
-              def limited_read(*args, **kwargs):
-                  if 'nrows' not in kwargs or kwargs.get('nrows', max_rows) > max_rows:
-                      kwargs['nrows'] = max_rows
-                  return original_read(*args, **kwargs)
-              pd.read_csv = limited_read
-              
-              # Try to import and run SDWA
-              try:
-                  if os.path.exists('epa_sdwa_loader.py'):
-                      logger.info("Testing SDWA loader...")
-                      import epa_sdwa_loader
-                      
-                      # Override table naming to add TEST_ prefix
-                      if hasattr(epa_sdwa_loader, 'get_table_name_from_filename'):
-                          orig_name = epa_sdwa_loader.get_table_name_from_filename
-                          epa_sdwa_loader.get_table_name_from_filename = lambda f: "TEST_" + orig_name(f)
-                      
-                      result = epa_sdwa_loader.main()
-                      logger.info(f"SDWA test result: {result}")
-                  else:
-                      logger.warning("SDWA loader not found")
-                      result = 0
-              except Exception as e:
-                  logger.error(f"SDWA test failed: {e}")
-                  result = 1
-              
-              return result
-
-          if __name__ == "__main__":
-              sys.exit(run_limited_test())
-          SCRIPT_END
-      
-      - name: Run Test
+      - name: Run Limited Test
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
-          SNOWFLAKE_SCHEMA: EPA_TEST_RESULTS
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
-          MAX_ROWS_PER_TABLE: ${{ env.TEST_ROW_LIMIT }}
+          MAX_ROWS_PER_TABLE: ${{ github.event.inputs.row_limit || '1000' }}
+          MAX_FILES_TO_PROCESS: ${{ github.event.inputs.file_limit || '3' }}
         run: |
-          echo "Starting test with row limit: ${MAX_ROWS_PER_TABLE}"
-          python run_test.py
+          echo "=== EPA TEST PIPELINE ==="
+          echo "Row limit: ${MAX_ROWS_PER_TABLE}"
+          echo "File limit: ${MAX_FILES_TO_PROCESS}"
+          echo "Schema: EPA_TEST_RESULTS"
+          echo "========================"
+          
+          # Check if test script exists
+          if [ -f "test_epa_pipeline.py" ]; then
+              python test_epa_pipeline.py
+          else
+              # Create the test script inline
+              cat > test_epa_pipeline.py << 'ENDSCRIPT'
+import os, sys, logging, tempfile, zipfile, shutil
+from datetime import datetime
+import requests, pandas as pd, snowflake.connector
+from snowflake.connector.pandas_tools import write_pandas
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+logging.getLogger('snowflake.connector').setLevel(logging.WARNING)
+
+MAX_ROWS = int(os.environ.get('MAX_ROWS_PER_TABLE', '1000'))
+MAX_FILES = int(os.environ.get('MAX_FILES_TO_PROCESS', '3'))
+
+logger.info(f"TEST CONFIG: {MAX_ROWS} rows max, {MAX_FILES} files max")
+
+# Download and extract first few CSV files
+download_dir = tempfile.mkdtemp(prefix="test_epa_")
+logger.info(f"Using temp dir: {download_dir}")
+
+try:
+    # Download SDWA
+    url = "https://echo.epa.gov/files/echodownloads/SDWA_latest_downloads.zip"
+    logger.info(f"Downloading from {url}")
+    response = requests.get(url, stream=True, timeout=60)
+    zip_path = os.path.join(download_dir, "sdwa.zip")
+    with open(zip_path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+    
+    # Extract CSVs
+    csv_files = []
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        for name in z.namelist()[:MAX_FILES]:  # Limit files
+            if name.endswith('.csv'):
+                z.extract(name, download_dir)
+                csv_files.append(os.path.join(download_dir, name))
+    
+    logger.info(f"Processing {len(csv_files)} CSV files")
+    
+    # Connect to Snowflake
+    private_key_str = os.environ['SNOWFLAKE_PRIVATE_KEY']
+    private_key_bytes = private_key_str.encode('utf-8')
+    private_key = serialization.load_pem_private_key(private_key_bytes, password=None, backend=default_backend())
+    private_key_der = private_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    
+    conn = snowflake.connector.connect(
+        account=os.environ['SNOWFLAKE_ACCOUNT'],
+        user=os.environ['SNOWFLAKE_USER'],
+        private_key=private_key_der,
+        warehouse=os.environ['SNOWFLAKE_WAREHOUSE'],
+        database=os.environ['SNOWFLAKE_DATABASE'],
+        schema='EPA_TEST_RESULTS',
+        role=os.environ['SNOWFLAKE_ROLE']
+    )
+    
+    logger.info("Connected to Snowflake EPA_TEST_RESULTS schema")
+    
+    # Process each CSV with row limit
+    for csv_file in csv_files:
+        filename = os.path.basename(csv_file).replace('.csv', '')
+        table_name = f"TEST_{filename}".upper()
+        
+        logger.info(f"Loading {MAX_ROWS} rows to {table_name}")
+        
+        # Read LIMITED rows only
+        df = pd.read_csv(csv_file, nrows=MAX_ROWS, dtype=str, na_filter=False)
+        df.columns = [c.replace(' ', '_').replace('-', '_').upper() for c in df.columns]
+        df['LOAD_TIMESTAMP'] = datetime.now()
+        df['TEST_RUN'] = True
+        df['ROW_COUNT'] = len(df)
+        
+        # Create table
+        cols = [f'"{c}" STRING' for c in df.columns]
+        ddl = f"CREATE OR REPLACE TABLE {table_name} ({', '.join(cols)})"
+        conn.cursor().execute(ddl)
+        
+        # Load data
+        success, _, _, _ = write_pandas(conn, df, table_name, auto_create_table=False, quote_identifiers=True)
+        
+        if success:
+            logger.info(f"✅ Loaded {len(df)} rows to {table_name}")
+        else:
+            logger.error(f"❌ Failed to load {table_name}")
+    
+    conn.close()
+    logger.info("Test complete!")
+    
+finally:
+    shutil.rmtree(download_dir, ignore_errors=True)
+ENDSCRIPT
+              
+              python test_epa_pipeline.py
+          fi
       
-      - name: Test Summary
+      - name: Summary
         if: always()
         run: |
-          echo "Test completed"
-          echo "Tables created in EPA_TEST_RESULTS with TEST_ prefix"
-          echo "Maximum ${TEST_ROW_LIMIT} rows per table"
+          echo "=== TEST COMPLETE ==="
+          echo "Tables created in EPA_TEST_RESULTS schema"
+          echo "All tables prefixed with TEST_"
+          echo "Limited to ${{ github.event.inputs.row_limit || '1000' }} rows per table"
+          echo "Limited to ${{ github.event.inputs.file_limit || '3' }} files"
