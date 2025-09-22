@@ -1,7 +1,9 @@
 name: EPA Pipeline Test
 
+name: EPA Pipeline Test
+
 on:
-  # Always allow manual trigger
+  # Manual trigger with inputs
   workflow_dispatch:
     inputs:
       row_limit:
@@ -13,14 +15,14 @@ on:
         required: false
         default: '3'
   
-  # Trigger on push to any branch
+  # Trigger on any push to repository
   push:
     paths:
       - '**.py'
       - 'requirements.txt'
       - '.github/workflows/**'
   
-  # Trigger on PRs
+  # Trigger on pull requests to main/master
   pull_request:
     branches:
       - main
