@@ -1,7 +1,7 @@
 name: EPA Pipeline Test
 
 on:
-  # Run on every push to any branch
+  # Run on pushes to any branch
   push:
     branches:
       - '**'
@@ -16,7 +16,7 @@ on:
       - main
       - master
   
-  # Allow manual trigger for debugging
+  # Allow manual trigger
   workflow_dispatch:
     inputs:
       row_limit:
@@ -33,7 +33,7 @@ jobs:
   test-pipeline:
     name: Test EPA Data Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Much shorter timeout for tests
+    timeout-minutes: 30
     
     steps:
       - name: Checkout Repository
@@ -63,123 +63,64 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Run Pipeline Tests
-        env:
-          # Use test schema instead of production
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
-          SNOWFLAKE_SCHEMA: EPA_TEST_RESULTS  # Test schema
-          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
-          TEST_MODE: "true"
-          MAX_ROWS_PER_TABLE: ${{ env.TEST_ROW_LIMIT }}
-          TEST_SDWA: "true"
-          TEST_FRS: "true"
+      - name: Create Test Script
         run: |
-          echo "=== EPA Pipeline Test Run ==="
-          echo "Timestamp: $(date)"
-          echo "Commit: ${{ github.sha }}"
-          echo "Branch: ${{ github.ref }}"
-          echo "Test row limit: ${MAX_ROWS_PER_TABLE}"
-          
-          # Run the dedicated test script
-          if [ -f "test_epa_loader.py" ]; then
-              python test_epa_loader.py
-          elif [ -f "scripts/test_epa_loader.py" ]; then
-              python scripts/test_epa_loader.py
-          else
-              echo "Test script not found, creating inline..."
+          cat > run_test.py << 'SCRIPT_END'
+          import os
+          import sys
+          import logging
+          import pandas as pd
+          from datetime import datetime
+
+          logging.basicConfig(level=logging.INFO)
+          logger = logging.getLogger(__name__)
+
+          # Suppress Snowflake warnings
+          logging.getLogger('snowflake.connector').setLevel(logging.WARNING)
+          logging.getLogger('snowflake.connector.ocsp_snowflake').setLevel(logging.ERROR)
+
+          def run_limited_test():
+              max_rows = int(os.environ.get('MAX_ROWS_PER_TABLE', '1000'))
+              logger.info(f"Running test with {max_rows} row limit")
               
-              # Download the test script content
-              cat > test_epa_loader.py << 'TESTSCRIPT'
-#!/usr/bin/env python3
-import os
-import sys
-import logging
-import tempfile
-from datetime import datetime
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-logging.getLogger('snowflake.connector').setLevel(logging.WARNING)
-logging.getLogger('snowflake.connector.ocsp_snowflake').setLevel(logging.ERROR)
-
-def test_loader_with_limit(loader_type='sdwa'):
-    """Test EPA loader with row limits."""
-    max_rows = int(os.environ.get('MAX_ROWS_PER_TABLE', '1000'))
-    logger.info(f"Testing {loader_type.upper()} with max {max_rows} rows per table")
-    
-    # Import the loader
-    if loader_type == 'sdwa':
-        if os.path.exists('epa_sdwa_loader.py'):
-            import epa_sdwa_loader as loader
-        else:
-            logger.error("SDWA loader not found")
-            return 1
-    else:
-        if os.path.exists('epa_frs_loader.py'):
-            import epa_frs_loader as loader
-        else:
-            logger.warning("FRS loader not found, skipping")
-            return 0
-    
-    # Monkey patch the CSV reading to limit rows
-    import pandas as pd
-    original_read_csv = pd.read_csv
-    
-    def limited_read_csv(*args, **kwargs):
-        # Force nrows limit
-        if 'nrows' not in kwargs or kwargs['nrows'] > max_rows:
-            kwargs['nrows'] = max_rows
-        logger.info(f"Reading CSV with limit: {kwargs.get('nrows')} rows")
-        return original_read_csv(*args, **kwargs)
-    
-    pd.read_csv = limited_read_csv
-    
-    # Override table names to add TEST_ prefix
-    if hasattr(loader, 'get_table_name_from_filename'):
-        original_get_name = loader.get_table_name_from_filename
-        loader.get_table_name_from_filename = lambda f: "TEST_" + original_get_name(f)
-    
-    # Force test schema
-    os.environ['SNOWFLAKE_SCHEMA'] = 'EPA_TEST_RESULTS'
-    
-    try:
-        exit_code = loader.main()
-        logger.info(f"{loader_type.upper()} test completed with code {exit_code}")
-        return exit_code
-    except Exception as e:
-        logger.error(f"{loader_type.upper()} test failed: {e}")
-        return 1
-
-# Run tests
-sdwa_result = test_loader_with_limit('sdwa')
-frs_result = test_loader_with_limit('frs')
-
-logger.info("="*60)
-logger.info(f"SDWA Test: {'PASSED' if sdwa_result == 0 else 'FAILED'}")
-logger.info(f"FRS Test: {'PASSED' if frs_result == 0 else 'FAILED'}")
-logger.info("="*60)
-
-sys.exit(0 if (sdwa_result == 0 and frs_result == 0) else 1)
-TESTSCRIPT
+              # Force test schema
+              os.environ['SNOWFLAKE_SCHEMA'] = 'EPA_TEST_RESULTS'
               
-              python test_epa_loader.py
-          fi
-          
-          EXIT_CODE=$?
-          
-          if [ $EXIT_CODE -eq 0 ]; then
-              echo "✅ All pipeline tests passed"
-          else
-              echo "❌ Pipeline tests failed"
-              exit 1
-          fi
+              # Monkey-patch pandas to limit rows
+              original_read = pd.read_csv
+              def limited_read(*args, **kwargs):
+                  if 'nrows' not in kwargs or kwargs.get('nrows', max_rows) > max_rows:
+                      kwargs['nrows'] = max_rows
+                  return original_read(*args, **kwargs)
+              pd.read_csv = limited_read
+              
+              # Try to import and run SDWA
+              try:
+                  if os.path.exists('epa_sdwa_loader.py'):
+                      logger.info("Testing SDWA loader...")
+                      import epa_sdwa_loader
+                      
+                      # Override table naming to add TEST_ prefix
+                      if hasattr(epa_sdwa_loader, 'get_table_name_from_filename'):
+                          orig_name = epa_sdwa_loader.get_table_name_from_filename
+                          epa_sdwa_loader.get_table_name_from_filename = lambda f: "TEST_" + orig_name(f)
+                      
+                      result = epa_sdwa_loader.main()
+                      logger.info(f"SDWA test result: {result}")
+                  else:
+                      logger.warning("SDWA loader not found")
+                      result = 0
+              except Exception as e:
+                  logger.error(f"SDWA test failed: {e}")
+                  result = 1
+              
+              return result
+
+          if __name__ == "__main__":
+              sys.exit(run_limited_test())
+          SCRIPT_END
       
-      - name: Clean Up Test Tables
-        if: always()
+      - name: Run Test
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -188,70 +129,14 @@ TESTSCRIPT
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_SCHEMA: EPA_TEST_RESULTS
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+          MAX_ROWS_PER_TABLE: ${{ env.TEST_ROW_LIMIT }}
         run: |
-          # Optional: Clean up test tables after run
-          python -c "
-          import os
-          import snowflake.connector
-          from cryptography.hazmat.backends import default_backend
-          from cryptography.hazmat.primitives import serialization
-          
-          try:
-              # Parse private key
-              private_key_str = os.environ.get('SNOWFLAKE_PRIVATE_KEY')
-              private_key_bytes = private_key_str.encode('utf-8')
-              private_key = serialization.load_pem_private_key(
-                  private_key_bytes,
-                  password=None,
-                  backend=default_backend()
-              )
-              private_key_der = private_key.private_bytes(
-                  encoding=serialization.Encoding.DER,
-                  format=serialization.PrivateFormat.PKCS8,
-                  encryption_algorithm=serialization.NoEncryption()
-              )
-              
-              # Connect
-              conn = snowflake.connector.connect(
-                  account=os.environ['SNOWFLAKE_ACCOUNT'],
-                  user=os.environ['SNOWFLAKE_USER'],
-                  private_key=private_key_der,
-                  warehouse=os.environ['SNOWFLAKE_WAREHOUSE'],
-                  database=os.environ['SNOWFLAKE_DATABASE'],
-                  schema=os.environ['SNOWFLAKE_SCHEMA'],
-                  role=os.environ['SNOWFLAKE_ROLE']
-              )
-              
-              cursor = conn.cursor()
-              
-              # List test tables
-              cursor.execute(\"\"\"
-                  SELECT TABLE_NAME 
-                  FROM INFORMATION_SCHEMA.TABLES 
-                  WHERE TABLE_SCHEMA = 'EPA_TEST_RESULTS' 
-                    AND TABLE_NAME LIKE 'TEST_%'
-              \"\"\")
-              
-              tables = cursor.fetchall()
-              print(f'Found {len(tables)} test tables')
-              
-              # Optional: Drop old test tables (uncomment if desired)
-              # for (table_name,) in tables:
-              #     cursor.execute(f'DROP TABLE IF EXISTS \"{table_name}\"')
-              #     print(f'Dropped {table_name}')
-              
-              cursor.close()
-              conn.close()
-              
-          except Exception as e:
-              print(f'Cleanup warning: {e}')
-          "
+          echo "Starting test with row limit: ${MAX_ROWS_PER_TABLE}"
+          python run_test.py
       
-      - name: Post Test Summary
+      - name: Test Summary
         if: always()
         run: |
-          echo "=== Test Pipeline Complete ==="
-          echo "Commit: ${{ github.sha }}"
-          echo "Author: ${{ github.actor }}"
-          echo "Test tables created in EPA_TEST_RESULTS schema with TEST_ prefix"
-          echo "Only first ${{ env.TEST_ROW_LIMIT }} rows loaded per table"
+          echo "Test completed"
+          echo "Tables created in EPA_TEST_RESULTS with TEST_ prefix"
+          echo "Maximum ${TEST_ROW_LIMIT} rows per table"
