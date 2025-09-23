@@ -31,6 +31,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Reduce Snowflake connector verbosity
+logging.getLogger('snowflake.connector').setLevel(logging.WARNING)
+logging.getLogger('snowflake.connector.ocsp_snowflake').setLevel(logging.ERROR)
+logging.getLogger('snowflake.connector.vendored.urllib3').setLevel(logging.WARNING)
+
 class EPASDWADownloader:
     """Downloads and processes EPA SDWA data from ECHO system."""
     
@@ -262,32 +267,40 @@ class SnowflakeKeyPairLoader:
             return False
     
     def create_or_alter_table(self, df: pd.DataFrame, table_name: str) -> str:
-        """Create table if not exists, or alter if schema changed."""
+        """Create table if not exists, or verify columns if it does."""
         table_name = table_name.upper()
         
         # Check if table exists
         if self.table_exists(table_name):
-            logger.info(f"Table {table_name} already exists - checking for missing columns")
+            logger.info(f"Table {table_name} already exists - verifying columns")
             
-            # Check if required metadata columns exist and add them if missing
             cursor = self.conn.cursor()
             
             # Get existing columns
             cursor.execute(f"DESCRIBE TABLE \"{table_name}\"")
-            existing_columns = [row[0].upper() for row in cursor.fetchall()]
+            existing_columns = {row[0].upper(): row[1] for row in cursor.fetchall()}
             
-            # Add missing metadata columns
-            if 'LOAD_ID' not in existing_columns:
-                logger.info(f"Adding LOAD_ID column to {table_name}")
-                cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_ID" STRING')
+            # Check if metadata columns exist
+            required_columns = ['LOAD_ID', 'LOAD_TIMESTAMP', 'LOAD_DATE']
+            missing_columns = [col for col in required_columns if col not in existing_columns]
             
-            if 'LOAD_TIMESTAMP' not in existing_columns:
-                logger.info(f"Adding LOAD_TIMESTAMP column to {table_name}")
-                cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_TIMESTAMP" TIMESTAMP DEFAULT CURRENT_TIMESTAMP()')
-            
-            if 'LOAD_DATE' not in existing_columns:
-                logger.info(f"Adding LOAD_DATE column to {table_name}")
-                cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_DATE" DATE DEFAULT CURRENT_DATE()')
+            if missing_columns:
+                logger.info(f"Missing columns in {table_name}: {missing_columns}")
+                
+                # Add columns without default values to avoid syntax errors
+                if 'LOAD_ID' in missing_columns:
+                    logger.info(f"Adding LOAD_ID column to {table_name}")
+                    cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_ID" STRING')
+                
+                if 'LOAD_TIMESTAMP' in missing_columns:
+                    logger.info(f"Adding LOAD_TIMESTAMP column to {table_name}")
+                    cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_TIMESTAMP" TIMESTAMP')
+                
+                if 'LOAD_DATE' in missing_columns:
+                    logger.info(f"Adding LOAD_DATE column to {table_name}")
+                    cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "LOAD_DATE" DATE')
+            else:
+                logger.info(f"All required columns exist in {table_name}")
             
             cursor.close()
             return "EXISTS"
