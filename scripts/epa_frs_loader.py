@@ -350,6 +350,34 @@ class SnowflakeFRSLoader:
             # Create or check table
             status = self.create_or_alter_table(df_sample, table_name)
             
+            # If table exists, check for column compatibility
+            if status == "EXISTS":
+                cursor = self.conn.cursor()
+                cursor.execute(f"DESCRIBE TABLE \"{table_name}\"")
+                existing_cols = {row[0].upper() for row in cursor.fetchall()}
+                cursor.close()
+                
+                # Clean new column names
+                new_cols = {col.replace(' ', '_').replace('-', '_').upper() for col in df_sample.columns}
+                
+                # Check for mismatches
+                missing_in_table = new_cols - existing_cols
+                missing_in_csv = existing_cols - new_cols - {'LOAD_TIMESTAMP', 'LOAD_DATE', 'LOAD_ID'}
+                
+                if missing_in_table and not missing_in_csv:
+                    # New columns in CSV that aren't in table - need to add them
+                    logger.warning(f"New columns in CSV not in table: {missing_in_table}")
+                    cursor = self.conn.cursor()
+                    for col in missing_in_table:
+                        try:
+                            logger.info(f"Adding new column {col} to {table_name}")
+                            cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" STRING')
+                        except Exception as e:
+                            logger.warning(f"Could not add column {col}: {e}")
+                    cursor.close()
+                elif missing_in_csv:
+                    logger.warning(f"Table has columns not in CSV (will be NULL): {missing_in_csv}")
+            
             # Process CSV in chunks
             chunk_count = 0
             for chunk in pd.read_csv(csv_path, chunksize=chunk_size, dtype=str, na_filter=False):
