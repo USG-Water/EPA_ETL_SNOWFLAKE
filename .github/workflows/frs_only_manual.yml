@@ -1,0 +1,102 @@
+name: FRS Data Load Only
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type YES to confirm FRS load'
+        required: true
+        default: 'NO'
+
+env:
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  frs-load:
+    name: Load FRS Data
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event.inputs.confirm == 'YES'
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local
+            /opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          export SNOWFLAKE_CONNECTOR_LOG_LEVEL=WARNING
+      
+      - name: Run FRS ETL Only
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          echo "Starting FRS ETL process (SDWA skipped)..."
+          echo "Timestamp: $(date)"
+          
+          # Reduce logging verbosity
+          export PYTHONWARNINGS="ignore"
+          
+          # Run only the FRS ETL script
+          if [ -f "epa_frs_loader.py" ]; then
+              python epa_frs_loader.py
+          elif [ -f "scripts/epa_frs_loader.py" ]; then
+              python scripts/epa_frs_loader.py
+          else
+              echo "Error: Cannot find epa_frs_loader.py"
+              exit 1
+          fi
+          
+          EXIT_CODE=$?
+          echo "FRS ETL process completed with exit code: $EXIT_CODE"
+          exit $EXIT_CODE
+      
+      - name: Upload Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frs-only-failure-logs-${{ github.run_number }}
+          path: |
+            *.log
+            /tmp/epa_frs_data_*
+          retention-days: 7
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== FRS Only Load Complete ==="
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Status: ${{ job.status }}"
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # FRS Data Load Results
+          
+          - **Run ID:** ${{ github.run_id }}
+          - **Triggered By:** ${{ github.actor }}
+          - **Status:** ${{ job.status }}
+          
+          This was a FRS-only load. SDWA data was not processed.
+          EOF
